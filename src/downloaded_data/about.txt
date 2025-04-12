@@ -1,1 +1,13 @@
-# This is where the PDF files will be stored. 
+Folder used for storing the found PDF files across the webpages.
+
+Each company will get its own folder under the corresponding name that follows this pattern:
+
+--/downloaded_data/
+    --/{company_1}_{INN}/
+        -- PDF_file_1
+        -- PDF_file_2
+        ...
+        -- PDF_file_n
+    --/{company_2}_{INN}/
+        ...
+    --/{company_n}_{INN}/
