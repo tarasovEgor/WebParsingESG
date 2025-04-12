@@ -1,0 +1,5 @@
+Folder used for storing the XLSX files. 
+
+XLSX template requires the following structure to be read by parser:
+
+| company | url | INN |
