@@ -1,14 +1,22 @@
 import os
 import time
-import requests
 import csv
 
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from multiprocessing import Lock
 
+NON_HTML_EXTENSIONS = ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.rar', '.7z')
+
+output_file = 'alrosa_sample.csv'
+already_saved_links = set()
+if os.path.exists(output_file):
+    with open(output_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            already_saved_links.add(row['url'])
+    print(f"[Init] Loaded {len(already_saved_links)} links from existing CSV.")
 
 def init_driver():
     options = Options()
@@ -16,167 +24,160 @@ def init_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    return webdriver.Chrome(options=options)
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(30)
+    return driver
 
+def clean_url(url):
+    return url.rstrip('/')
+
+def get_domain_path(url):
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+
+def is_subpath(parent, child):
+    return get_domain_path(child).startswith(get_domain_path(parent))
+
+def normalize_url(url):
+    parsed = urlparse(url)
+    normalized = urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', '', ''))
+    return normalized
 
 def get_internal_links(driver, base_url):
     soup = BeautifulSoup(driver.page_source, 'html.parser')
-    links = set()
+    links = []
     for a in soup.find_all('a', href=True):
-        href = a['href']
-        if not href.startswith('http'):
-            href = urljoin(base_url, href)
-        if base_url in href:
-            links.add(href)
-    return list(links)
+        href = urljoin(base_url, a['href'])
+        href_lower = href.lower()
 
+        if any(href_lower.endswith(ext) for ext in NON_HTML_EXTENSIONS):
+            continue
 
-def get_page_text(driver):
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
-    for script in soup(["script", "style"]):
-        script.extract()
-    return soup.get_text(separator=' ', strip=True)
+        if 'print=y' in href_lower:
+            continue
 
+        if is_subpath(base_url, href):
+            normalized_href = normalize_url(href)
+            text = a.get_text(strip=True)
+            links.append((normalized_href, text))
+    print(f"[get_internal_links] Found {len(links)} internal links on {base_url}")
+    return links
 
-def get_sitemap_links(base_url, filter_years=['2023', '2024', '2025']):
-    sitemap_index_url = urljoin(base_url, '/sitemap.xml')
-    filtered_links = set()
-    all_links = set()
+def contains_keyword(url, a_text, page_title, keywords):
+    url_lower = url.lower()
+    a_text_lower = (a_text or '').lower()
+    title_lower = (page_title or '').lower()
 
-    def should_include(lastmod_text, loc_text):
-        if not filter_years:
-            return True
-        return any(year in (lastmod_text or '') for year in filter_years) or \
-               any(year in (loc_text or '') for year in filter_years)
-
-    def is_sitemap_url(link):
-        return link.endswith('.xml') or 'sitemap' in link.lower()
-
-    try:
-        res = requests.get(sitemap_index_url, timeout=10)
-        if res.status_code != 200:
-            return []
-
-        soup = BeautifulSoup(res.content, 'xml')
-
-        if soup.find('sitemapindex'):
-            for sitemap in soup.find_all('sitemap'):
-                loc = sitemap.find('loc')
-                if loc:
-                    child_url = loc.text
-                    try:
-                        child_res = requests.get(child_url, timeout=10)
-                        if child_res.status_code == 200:
-                            child_soup = BeautifulSoup(child_res.content, 'xml')
-                            for url_tag in child_soup.find_all('url'):
-                                loc_tag = url_tag.find('loc')
-                                lastmod_tag = url_tag.find('lastmod')
-                                if loc_tag:
-                                    url = loc_tag.text
-                                    if not is_sitemap_url(url):
-                                        all_links.add(url)
-                                        if should_include(lastmod_tag.text if lastmod_tag else '', url):
-                                            filtered_links.add(url)
-                    except Exception as e:
-                        print(f"[Child sitemap error] {child_url} – {e}")
-        else:
-            for url_tag in soup.find_all('url'):
-                loc_tag = url_tag.find('loc')
-                lastmod_tag = url_tag.find('lastmod')
-                if loc_tag:
-                    url = loc_tag.text
-                    if not is_sitemap_url(url):
-                        all_links.add(url)
-                        if should_include(lastmod_tag.text if lastmod_tag else '', url):
-                            filtered_links.add(url)
-
-    except Exception as e:
-        print(f"[Sitemap error] {sitemap_index_url} – {e}")
-
-    final_links = filtered_links if len(filtered_links) > 3 else all_links
-    final_links.add(base_url.rstrip('/'))
-
-    return list(final_links)
-
-
-def download_pdfs(driver, base_url, company_inn_folder):
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
-    pdf_urls = set()
-
-    required_keywords = ['отчет', 'доклад', 'устойчив', 'esg', 'отчёт', 'соц', 'эколог', 'ответствен']
-    blacklist_keywords = ['белые ночи', 'д.2', 'корп.', 'изменения', 'заявление', 'разрешение']
-
-    def is_relevant(pdf_url):
-        filename = os.path.basename(urlparse(pdf_url).path).lower()
-        if any(bad in filename for bad in blacklist_keywords):
-            return False
-        return any(good in filename for good in required_keywords)
-
-    for tag in soup.find_all(['a', 'iframe', 'embed']):
-        href = tag.get('href') or tag.get('src')
-        if href and href.lower().endswith('.pdf'):
-            full_url = href if href.startswith('http') else urljoin(base_url, href)
-            if is_relevant(full_url):
-                pdf_urls.add(full_url)
-
-    os.makedirs(company_inn_folder, exist_ok=True)
-
-    for pdf_url in pdf_urls:
-        try:
-            pdf_name = os.path.basename(urlparse(pdf_url).path)
-            pdf_path = os.path.join(company_inn_folder, pdf_name)
-            if os.path.exists(pdf_path):
-                continue
-
-            print(f"Downloading PDF: {pdf_url}")
-            r = requests.get(pdf_url, timeout=10)
-            r.raise_for_status()
-            with open(pdf_path, 'wb') as f:
-                f.write(r.content)
-        except Exception as e:
-            print(f"[PDF error] {pdf_url}: {e}")
-
+    for kw in keywords:
+        kw_lower = kw.lower()
+        if kw_lower in url_lower:
+            return kw, 'url'
+        if kw_lower in a_text_lower:
+            return kw, 'a_text'
+        if kw_lower in title_lower:
+            return kw, 'title'
+    return None, None
 
 def scrape_company_task(args):
-    company, url, inn, output_dir, lock = args
+    company, root_url, inn, output_dir, lock, keywords_eng, keywords_ru = args
+    all_keywords = keywords_eng.union(keywords_ru)
+
+    print(f"[{company}] Starting scraping: {root_url}")
+
     driver = init_driver()
-    parsed_links = set()
-    company_inn_folder = os.path.join(output_dir, f"{company}_{inn}")
-    os.makedirs(company_inn_folder, exist_ok=True)
+    visited_links = set()
+    results = []
+    link_count = 0
 
-    def parse_link(link):
-        if link in parsed_links or link.endswith('.xml'):
+    company_dir = os.path.join(output_dir, f"{company}_{inn}")
+    os.makedirs(company_dir, exist_ok=True)
+
+    def crawl_branch(link, a_text=None, depth=0, max_depth=5):
+        nonlocal link_count
+
+        normalized_link = normalize_url(link)
+        if depth > max_depth:
+            print(f"[{company}] Max depth reached at {normalized_link}")
             return
-        parsed_links.add(link)
+
+        if normalized_link in visited_links:
+            print(f"[{company}] Already visited: {normalized_link}")
+            return
+
+        if normalized_link in already_saved_links:
+            print(f"[{company}] Already saved (from file): {normalized_link}")
+            return
+
+        visited_links.add(normalized_link)
+
+        lower_link = normalized_link.lower()
+        if any(lower_link.endswith(ext) for ext in NON_HTML_EXTENSIONS) or 'print=y' in lower_link:
+            print(f"[{company}] Skipping non-HTML or print link: {normalized_link}")
+            return
+
         try:
-            driver.get(link)
-            time.sleep(2)
-            text = get_page_text(driver)
-            if "404" in text and ("not found" in text.lower() or "страница не найдена" in text.lower()):
-                return
+            print(f"[{company}] Visiting {normalized_link} at depth {depth}")
+            driver.get(normalized_link)
+            time.sleep(1)
+            page_title = driver.title or ""
 
-            download_pdfs(driver, link, company_inn_folder)
+            # Получаем полный текст страницы для записи в CSV
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            page_text = soup.get_text(separator=' ', strip=True) or ""
 
-            with lock:
-                with open('scraped_output_building.csv', 'a', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    writer.writerow([company, link, inn, text])
+            matched_keyword, matched_tag = contains_keyword(normalized_link, a_text or "", page_title, all_keywords)
+
+            if matched_keyword:
+                link_count += 1
+                print(f"[{company}] Matched keyword '{matched_keyword}' in {matched_tag} at {normalized_link}")
+                # В результат записываем полный текст страницы, а не title
+                results.append([company, normalized_link, inn, page_text, matched_keyword, matched_tag])
+                already_saved_links.add(normalized_link)
+
+            # Продолжаем обход внутренних ссылок
+            new_links = get_internal_links(driver, normalized_link)
+            print(f"[{company}] Found {len(new_links)} links to crawl from {normalized_link}")
+            for sub_link, sub_text in new_links:
+                crawl_branch(sub_link, a_text=sub_text, depth=depth + 1, max_depth=max_depth)
+
         except Exception as e:
-            print(f"[Parse error] {link}: {e}")
+            print(f"[{company}] [Error crawling {normalized_link}] {e}")
 
     try:
-        driver.get(url)
-        time.sleep(2)
-        links = get_internal_links(driver, url)
-        links.insert(0, url)
+        root_url_clean = normalize_url(clean_url(root_url))
+        print(f"[{company}] Starting from root URL: {root_url_clean}")
+        driver.get(root_url_clean)
+        time.sleep(1)
+        root_title = driver.title or ""
 
-        for link in links:
-            parse_link(link)
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        root_page_text = soup.get_text(separator=' ', strip=True) or ""
 
-        for sitemap_link in get_sitemap_links(url):
-            parse_link(sitemap_link)
+        matched_keyword, matched_tag = contains_keyword(root_url_clean, company, root_title, all_keywords)
+        if matched_keyword:
+            print(f"[{company}] Root page matched keyword '{matched_keyword}' in {matched_tag}")
+            results.append([company, root_url_clean, inn, root_page_text, matched_keyword, matched_tag])
+            already_saved_links.add(root_url_clean)
+        else:
+            print(f"[{company}] Root page has no keyword match")
+
+        initial_links = get_internal_links(driver, root_url_clean)
+        print(f"[{company}] Starting to crawl {len(initial_links)} initial links from root")
+        for link, a_text in initial_links:
+            crawl_branch(link, a_text=a_text, depth=1)
+
+        print(f"[{company}] ✅ Done. Total matched pages saved: {len(results)}")
+
+        with lock:
+            file_exists = os.path.exists(output_file)
+            with open(output_file, 'a', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(['company', 'url', 'INN', 'web_page_text', 'matched_keyword', 'matched_tag_content'])
+                writer.writerows(results)
 
     except Exception as e:
-        print(f"[{company}] Task error: {e}")
+        print(f"[{company}] ❌ General error: {e}")
+
     finally:
         driver.quit()
