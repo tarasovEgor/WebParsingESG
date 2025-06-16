@@ -7,9 +7,11 @@ from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
+from driver_utils import get_driver
+
 NON_HTML_EXTENSIONS = ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.rar', '.7z')
 
-output_file = 'alrosa_sample.csv'
+output_file = 'finfinfin.csv'
 already_saved_links = set()
 if os.path.exists(output_file):
     with open(output_file, 'r', encoding='utf-8') as f:
@@ -18,30 +20,25 @@ if os.path.exists(output_file):
             already_saved_links.add(row['url'])
     print(f"[Init] Loaded {len(already_saved_links)} links from existing CSV.")
 
-def init_driver():
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    driver = webdriver.Chrome(options=options)
-    driver.set_page_load_timeout(30)
-    return driver
 
 def clean_url(url):
     return url.rstrip('/')
+
 
 def get_domain_path(url):
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
 
+
 def is_subpath(parent, child):
     return get_domain_path(child).startswith(get_domain_path(parent))
+
 
 def normalize_url(url):
     parsed = urlparse(url)
     normalized = urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', '', ''))
     return normalized
+
 
 def get_internal_links(driver, base_url):
     soup = BeautifulSoup(driver.page_source, 'html.parser')
@@ -63,6 +60,7 @@ def get_internal_links(driver, base_url):
     print(f"[get_internal_links] Found {len(links)} internal links on {base_url}")
     return links
 
+
 def contains_keyword(url, a_text, page_title, keywords):
     url_lower = url.lower()
     a_text_lower = (a_text or '').lower()
@@ -78,13 +76,14 @@ def contains_keyword(url, a_text, page_title, keywords):
             return kw, 'title'
     return None, None
 
+
 def scrape_company_task(args):
     company, root_url, inn, output_dir, lock, keywords_eng, keywords_ru = args
     all_keywords = keywords_eng.union(keywords_ru)
 
     print(f"[{company}] Starting scraping: {root_url}")
 
-    driver = init_driver()
+    driver = get_driver()
     visited_links = set()
     results = []
     link_count = 0
@@ -121,7 +120,6 @@ def scrape_company_task(args):
             time.sleep(1)
             page_title = driver.title or ""
 
-            # Получаем полный текст страницы для записи в CSV
             soup = BeautifulSoup(driver.page_source, 'html.parser')
             page_text = soup.get_text(separator=' ', strip=True) or ""
 
@@ -130,11 +128,9 @@ def scrape_company_task(args):
             if matched_keyword:
                 link_count += 1
                 print(f"[{company}] Matched keyword '{matched_keyword}' in {matched_tag} at {normalized_link}")
-                # В результат записываем полный текст страницы, а не title
                 results.append([company, normalized_link, inn, page_text, matched_keyword, matched_tag])
                 already_saved_links.add(normalized_link)
 
-            # Продолжаем обход внутренних ссылок
             new_links = get_internal_links(driver, normalized_link)
             print(f"[{company}] Found {len(new_links)} links to crawl from {normalized_link}")
             for sub_link, sub_text in new_links:
