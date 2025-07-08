@@ -176,7 +176,7 @@ def scrape_company_task(args):
 
     def handle_pdf(link):
         """
-        Download PDF file from a given link if filename matches any keyword.
+        Download PDF-file from a given link if filename matches any keyword.
         """
         try:
             filename = os.path.basename(urlparse(link).path)
