@@ -6,13 +6,16 @@ from tqdm import tqdm
 from workers import scrape_company_task
 
 PDF_DOWNLOAD_ENABLED = True
+NEWS_ENABLED = True
 
 def main():
     df = pd.read_excel('src/templates/sample.xlsx', sheet_name='Лист1')
     keywords_df = pd.read_excel('src/templates/keywords.xlsx', sheet_name='Лист2')
+    news_keywords_df = pd.read_excel('src/templates/keywords.xlsx', sheet_name='news_keywords')
 
     keywords_eng = set(keywords_df['keyword_eng'].dropna().str.lower())
     keywords_ru = set(keywords_df['keyword_ru'].dropna().str.lower())
+    news_keywords = set(news_keywords_df['keyword'].dropna().str.lower())
 
     output_dir = 'downloaded_data'
     os.makedirs(output_dir, exist_ok=True)
@@ -21,7 +24,8 @@ def main():
     lock = manager.Lock()
 
     company_args = [
-        (row['company'], row['url'], row['INN'], output_dir, lock, keywords_eng, keywords_ru, PDF_DOWNLOAD_ENABLED)
+        (row['company'], row['url'], row['INN'], output_dir, lock,
+         keywords_eng, keywords_ru, PDF_DOWNLOAD_ENABLED, NEWS_ENABLED, news_keywords)
         for _, row in df.iterrows()
     ]   
 
